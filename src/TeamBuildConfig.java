@@ -1,11 +1,12 @@
 public class TeamBuildConfig {
-    public final boolean allowSameSpeciesInTeam;
-    public final boolean allowSharedTypes;
-    public final boolean allowSelfFusion;
+    // 0 = Off, 1-99 = Penalty/Bonus Weight, 100 = Hard Requirement
+    public final int speciesClauseVal;
+    public final int typeClauseVal;
+    public final int selfFusionClauseVal;
 
-    public TeamBuildConfig(boolean allowSameSpeciesInTeam, boolean allowSharedTypes, boolean allowSelfFusion) {
-        this.allowSameSpeciesInTeam = allowSameSpeciesInTeam;
-        this.allowSharedTypes = allowSharedTypes;
-        this.allowSelfFusion = allowSelfFusion;
+    public TeamBuildConfig(int speciesClauseVal, int typeClauseVal, int selfFusionClauseVal) {
+        this.speciesClauseVal = speciesClauseVal;
+        this.typeClauseVal = typeClauseVal;
+        this.selfFusionClauseVal = selfFusionClauseVal;
     }
 }

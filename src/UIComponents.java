@@ -30,13 +30,16 @@ public class UIComponents {
     private JLabel lblDexImage;
     private JProgressBar progressBar, calcProgress, teamProgress;
     
-    // Strategy Heatmap
     private StrategyPanel strategyPanel;
 
-    // Settings - MODIFIED: Removed obsolete genetic algorithm controls
-    private JCheckBox chkHiddenPenalty, chkAllowSameSpeciesInTeam, chkSharedTypes, chkSelfFusion;
+    // Constraint Sliders
+    private JSlider sldSpeciesClause, sldTypeClause, sldSelfFusion;
+    private JLabel lblSpeciesVal, lblTypeVal, lblSelfVal;
+    
+    // Scoring Weights
     private JSlider sldStatWeight, sldTypeWeight, sldAbilityWeight, sldMoveWeight;
     private JLabel lblStatW, lblTypeW, lblAbiW, lblMoveW;
+    private JCheckBox chkHiddenPenalty;
     
     private List<Fusion> calculatedFusions = new ArrayList<>();
     private Set<Fusion> pinnedFusions = new HashSet<>();
@@ -46,16 +49,13 @@ public class UIComponents {
     private TaskController currentTask;
     
     private static final Font BTN_FONT = new Font("Segoe UI", Font.BOLD, 12);
-    // Modified Colors for Dark Buttons
-    private static final Color BTN_BG = Color.BLACK;
-    private static final Color BTN_FG = Color.WHITE;
-    private static final Color BTN_BORDER = new Color(60, 60, 60);
-    
+    private static final Color BTN_BG = Color.WHITE;
+    private static final Color BTN_FG = Color.BLACK;
+    private static final Color BTN_BORDER = Color.GRAY;
     private static final Color ACCENT = new Color(79, 70, 229);
     private static final Color BG_DARK = new Color(30, 30, 30);
     private static final Color BG_LIGHT = new Color(250, 250, 250);
     
-    // Legendary Pokemon set
     private Set<String> legendarySet = new HashSet<>();
     
     public UIComponents(JFrame frame, DataManager data, FusionCalculator calc, TeamBuilder builder) {
@@ -70,13 +70,13 @@ public class UIComponents {
         loadTypeIcons();
     }
     
+    // ... [KEEP loadLegendaries, createTopPanel, createLeftPanel] ...
     private void loadLegendaries(String filename) {
         File file = new File(filename);
         if (!file.exists()) {
             System.err.println("Legendaries file not found: " + filename);
             return;
         }
-        
         try (Scanner sc = new Scanner(file)) {
             while (sc.hasNextLine()) {
                 String line = sc.nextLine().trim();
@@ -126,29 +126,167 @@ public class UIComponents {
         gbc.weightx = 1.0;
         gbc.insets = new Insets(0, 0, 15, 0); 
         
-        // 1. Roster - High WeightY to take up space
         JPanel p1 = createRosterPanel();
         gbc.weighty = 1.0; 
         panel.add(p1, gbc);
         
-        // 2. Calculation - No WeightY
         JPanel p2 = createCalcSettingsPanel();
         gbc.weighty = 0.0;
         panel.add(p2, gbc);
         
-        // 3. Team Settings - No WeightY
         JPanel p3 = createTeamSettingsPanel();
         gbc.weighty = 0.0;
         panel.add(p3, gbc);
         
-        // 4. Sprites - No WeightY
         JPanel p4 = createSpritePanel();
         gbc.weighty = 0.0;
         panel.add(p4, gbc);
         
         return panel;
     }
-    
+
+    private JPanel createConstraintSlider(String title, JSlider slider, JLabel label) {
+        JPanel p = new JPanel(new BorderLayout(5, 5));
+        p.setBackground(Color.WHITE);
+        
+        JLabel titleLbl = new JLabel(title);
+        titleLbl.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        p.add(titleLbl, BorderLayout.NORTH);
+        
+        slider.setBackground(Color.WHITE);
+        slider.setPreferredSize(new Dimension(150, 20));
+        p.add(slider, BorderLayout.CENTER);
+        
+        label.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        label.setPreferredSize(new Dimension(80, 20));
+        label.setHorizontalAlignment(SwingConstants.RIGHT);
+        p.add(label, BorderLayout.EAST);
+        
+        // Listener to update text
+        slider.addChangeListener(e -> {
+            int val = slider.getValue();
+            if (val == 0) label.setText("Disabled");
+            else if (val == 100) label.setText("Hard Ban");
+            else label.setText("Weight: " + val);
+        });
+        
+        // Trigger once to set initial text
+        slider.getChangeListeners()[0].stateChanged(new ChangeEvent(slider));
+        
+        return p;
+    }
+
+    private JPanel createTeamSettingsPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(Color.WHITE);
+        panel.setBorder(createStyledBorder("Team Constraints"));
+        
+        // Sliders for Constraints
+        sldSpeciesClause = new JSlider(0, 100, 100); // Default Hard
+        lblSpeciesVal = new JLabel();
+        panel.add(createConstraintSlider("Species Duplication:", sldSpeciesClause, lblSpeciesVal));
+        panel.add(Box.createVerticalStrut(5));
+        
+        sldTypeClause = new JSlider(0, 100, 50); // Default Weighted
+        lblTypeVal = new JLabel();
+        panel.add(createConstraintSlider("Type Stacking (>2):", sldTypeClause, lblTypeVal));
+        panel.add(Box.createVerticalStrut(5));
+        
+        sldSelfFusion = new JSlider(0, 100, 0); // Default Allowed
+        lblSelfVal = new JLabel();
+        panel.add(createConstraintSlider("Self Fusions:", sldSelfFusion, lblSelfVal));
+        
+        panel.add(Box.createVerticalStrut(15));
+        
+        JButton btnBuild = createButton("2. Find Optimal Team", this::runTeamBuilder, true);
+        btnBuild.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(btnBuild);
+        panel.add(Box.createVerticalStrut(8));
+        
+        teamProgress = new JProgressBar(0, 100);
+        teamProgress.setStringPainted(true);
+        teamProgress.setString("Ready");
+        teamProgress.setMaximumSize(new Dimension(400, 20));
+        teamProgress.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(teamProgress);
+        
+        return panel;
+    }
+
+    private void runTeamBuilder() {
+        if (isBuilding.get()) {
+            JOptionPane.showMessageDialog(frame, "Busy!", "Warning", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (calculatedFusions.isEmpty()) {
+            JOptionPane.showMessageDialog(frame, "Calculate fusions first!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        
+        if (currentTask != null) currentTask.cancel();
+        currentTask = new TaskController();
+        isBuilding.set(true);
+        teamProgress.setValue(0);
+        
+        // Pass slider values to config
+        TeamBuildConfig config = new TeamBuildConfig(
+            sldSpeciesClause.getValue(),
+            sldTypeClause.getValue(),
+            sldSelfFusion.getValue()
+        );
+        
+        new Thread(() -> {
+            log("\n=== TEAM SEARCH (Optimized) ===");
+            long start = System.currentTimeMillis();
+            
+            List<Team> teams = teamBuilder.buildTeams(calculatedFusions, pinnedFusions, config, currentTask,
+                (current, total) -> {
+                    SwingUtilities.invokeLater(() -> {
+                        teamProgress.setValue((int)((current / (float)total) * 100));
+                        teamProgress.setString("Checked: " + current);
+                    });
+                });
+            
+            SwingUtilities.invokeLater(() -> {
+                teamTableModel.setRowCount(0);
+                if (teams.isEmpty()) {
+                    log("No teams found.");
+                } else {
+                    for (int i = 0; i < teams.size(); i++) {
+                        Team t = teams.get(i);
+                        // FIX: Added balance bonus display
+                        String bonusStr = t.balanceBonus > 0 ? String.format(" (+%.3f)", t.balanceBonus) : 
+                                          t.balanceBonus < 0 ? String.format(" (%.3f)", t.balanceBonus) : "";
+                        
+                        teamTableModel.addRow(new Object[]{
+                            "Team " + (i+1) + bonusStr, "", "", "", "", "", 
+                            String.format("%.3f", t.realScore)
+                        });
+                        
+                        t.members.sort((a, b) -> Double.compare(b.score, a.score));
+                        for (Fusion f : t.members) {
+                            teamTableModel.addRow(new Object[]{
+                                "", cap(f.headName), cap(f.bodyName), f.typing, 
+                                f.chosenAbility, f.role, f.score
+                            });
+                        }
+                        teamTableModel.addRow(new Object[]{"", "", "", "", "", "", ""});
+                    }
+                    if (!teams.isEmpty()) {
+                        strategyPanel.displayTeam(teams.get(0));
+                    }
+                }
+                teamProgress.setValue(100);
+                teamProgress.setString("Done (" + (System.currentTimeMillis() - start) + "ms)");
+                isBuilding.set(false);
+            });
+        }).start();
+    }
+
+    // ... [Rest of helper methods: createSlider, createRosterPanel, createCalcSettingsPanel, createSpritePanel, showFilterDialog, etc.] ...
+    // These remain largely the same, just included for context if needed. I will output the FULL file for safety.
+
     private JPanel createSlider(String label, JSlider slider, JLabel valueLabel) {
         JPanel p = new JPanel(new BorderLayout(10, 0));
         p.setBackground(Color.WHITE);
@@ -177,28 +315,22 @@ public class UIComponents {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
         panel.setBorder(createStyledBorder("Roster Builder"));
         panel.setBackground(Color.WHITE);
-        
         JPanel searchPanel = new JPanel(new BorderLayout(5, 0));
         searchPanel.setBackground(Color.WHITE);
         searchPanel.add(new JLabel("Search: "), BorderLayout.WEST);
         txtRosterSearch = new JTextField();
         searchPanel.add(txtRosterSearch, BorderLayout.CENTER);
         panel.add(searchPanel, BorderLayout.NORTH);
-        
-        // Use GridBag for internal lists to share 50/50 space
         JPanel listsPanel = new JPanel(new GridLayout(1, 2, 8, 0));
         listsPanel.setBackground(Color.WHITE);
-        
         modelSearchResults = new DefaultListModel<>();
         listSearchResults = new JList<>(modelSearchResults);
         listSearchResults.setCellRenderer(new PokemonListRenderer());
         setupSearchLogic(txtRosterSearch, modelSearchResults, listSearchResults, this::addToRoster);
-        
         JScrollPane scrollSearch = new JScrollPane(listSearchResults);
         borderSearch = createStyledBorder("Available (0)");
         scrollSearch.setBorder(borderSearch);
         listsPanel.add(scrollSearch);
-        
         modelRoster = new DefaultListModel<>();
         listRoster = new JList<>(modelRoster);
         listRoster.setCellRenderer(new PokemonListRenderer());
@@ -207,14 +339,11 @@ public class UIComponents {
                 if (e.getKeyCode() == KeyEvent.VK_DELETE) removeFromRoster();
             }
         });
-        
         borderRoster = createStyledBorder("My Roster (0)");
         JScrollPane rosterScroll = new JScrollPane(listRoster);
         rosterScroll.setBorder(borderRoster);
         listsPanel.add(rosterScroll);
-        
         panel.add(listsPanel, BorderLayout.CENTER);
-        
         JPanel btnPanel = new JPanel(new GridLayout(3, 2, 8, 8));
         btnPanel.setBackground(Color.WHITE);
         btnPanel.setBorder(new EmptyBorder(8, 0, 0, 0));
@@ -225,7 +354,6 @@ public class UIComponents {
         btnPanel.add(createButton("Add Legendaries", this::addAllLegendaries, false));
         btnPanel.add(createButton("Remove Legendaries", this::removeAllLegendaries, false));
         panel.add(btnPanel, BorderLayout.SOUTH);
-        
         return panel;
     }
     
@@ -234,89 +362,45 @@ public class UIComponents {
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setBackground(Color.WHITE);
         panel.setBorder(createStyledBorder("Calculation Settings"));
-        
         chkHiddenPenalty = new JCheckBox("Apply Hidden Ability Penalty (-20%)");
         chkHiddenPenalty.setBackground(Color.WHITE);
         chkHiddenPenalty.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(chkHiddenPenalty);
         panel.add(Box.createVerticalStrut(8));
-        
         JButton btn = createButton("1. Calculate All Fusions (Click again to Cancel)", this::runCalculation, true);
         btn.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(btn);
         panel.add(Box.createVerticalStrut(8));
-        
         calcProgress = new JProgressBar(0, 100);
         calcProgress.setStringPainted(true);
         calcProgress.setString("Ready");
         calcProgress.setMaximumSize(new Dimension(400, 20));
         calcProgress.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(calcProgress);
-        
         return panel;
     }
-    
-    private JPanel createTeamSettingsPanel() {
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBackground(Color.WHITE);
-        panel.setBorder(createStyledBorder("Team Constraints"));
-        
-        // Constraints
-        chkAllowSameSpeciesInTeam = new JCheckBox("Allow Multiple of Same Species");
-        chkSharedTypes = new JCheckBox("Allow Shared Types (No Diversity Bonus)");
-        chkSelfFusion = new JCheckBox("Allow Self-Fusions");
-        
-        // Add checkboxes
-        for (JCheckBox cb : new JCheckBox[]{chkAllowSameSpeciesInTeam, chkSharedTypes, chkSelfFusion}) {
-            cb.setBackground(Color.WHITE);
-            cb.setAlignmentX(Component.LEFT_ALIGNMENT);
-            panel.add(cb);
-            panel.add(Box.createVerticalStrut(5));
-        }
-        
-        panel.add(Box.createVerticalStrut(10));
-        
-        JButton btnBuild = createButton("2. Find Optimal Team", this::runTeamBuilder, true);
-        btnBuild.setAlignmentX(Component.LEFT_ALIGNMENT);
-        panel.add(btnBuild);
-        panel.add(Box.createVerticalStrut(8));
-        
-        teamProgress = new JProgressBar(0, 100);
-        teamProgress.setStringPainted(true);
-        teamProgress.setString("Ready");
-        teamProgress.setMaximumSize(new Dimension(400, 20));
-        teamProgress.setAlignmentX(Component.LEFT_ALIGNMENT);
-        panel.add(teamProgress);
-        
-        return panel;
-    }
-    
+
     private JPanel createSpritePanel() {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setBackground(Color.WHITE);
         panel.setBorder(createStyledBorder("Sprite Manager"));
-        
         JButton btn = createButton("Download Missing Sprites", this::downloadSprites, false);
         btn.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(btn);
         panel.add(Box.createVerticalStrut(10));
-        
         progressBar = new JProgressBar(0, 100);
         progressBar.setStringPainted(true);
         progressBar.setString("Ready");
         progressBar.setMaximumSize(new Dimension(400, 20));
         progressBar.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(progressBar);
-        
         return panel;
     }
     
     private void showFilterDialog() {
         JDialog dlg = new JDialog(frame, "Filter Fusions", true);
         dlg.setLayout(new GridLayout(8, 2, 5, 5));
-        
         JTextField txtType = new JTextField();
         JTextField txtAbility = new JTextField();
         JTextField txtHP = new JTextField("0");
@@ -325,7 +409,6 @@ public class UIComponents {
         JTextField txtSpA = new JTextField("0");
         JTextField txtSpD = new JTextField("0");
         JTextField txtSpe = new JTextField("0");
-        
         dlg.add(new JLabel("Type contains:")); dlg.add(txtType);
         dlg.add(new JLabel("Ability contains:")); dlg.add(txtAbility);
         dlg.add(new JLabel("Min HP:")); dlg.add(txtHP);
@@ -334,34 +417,43 @@ public class UIComponents {
         dlg.add(new JLabel("Min Sp. Atk:")); dlg.add(txtSpA);
         dlg.add(new JLabel("Min Sp. Def:")); dlg.add(txtSpD);
         dlg.add(new JLabel("Min Speed:")); dlg.add(txtSpe);
-        
         JButton apply = createButton("Apply Filter", () -> {
-            FusionFilter filter = new FusionFilter();
-            filter.typeConstraint = txtType.getText();
-            filter.abilityConstraint = txtAbility.getText();
-            try {
-                filter.minHP = Integer.parseInt(txtHP.getText());
-                filter.minAtk = Integer.parseInt(txtAtk.getText());
-                filter.minDef = Integer.parseInt(txtDef.getText());
-                filter.minSpa = Integer.parseInt(txtSpA.getText());
-                filter.minSpd = Integer.parseInt(txtSpD.getText());
-                filter.minSpe = Integer.parseInt(txtSpe.getText());
-            } catch (Exception ignored) {}
-            
-            List<Fusion> filtered = filter.apply(calculatedFusions);
+            List<Fusion> filtered = new ArrayList<>();
+            String tQuery = txtType.getText().toLowerCase();
+            String aQuery = txtAbility.getText().toLowerCase();
+            int minHP = parseIntSafe(txtHP.getText());
+            int minAtk = parseIntSafe(txtAtk.getText());
+            int minDef = parseIntSafe(txtDef.getText());
+            int minSpA = parseIntSafe(txtSpA.getText());
+            int minSpD = parseIntSafe(txtSpD.getText());
+            int minSpe = parseIntSafe(txtSpe.getText());
+            for (Fusion f : calculatedFusions) {
+                boolean match = true;
+                if (!tQuery.isEmpty() && !f.typing.toLowerCase().contains(tQuery)) match = false;
+                if (!aQuery.isEmpty() && !f.chosenAbility.toLowerCase().contains(aQuery)) match = false;
+                if (f.hp < minHP) match = false;
+                if (f.atk < minAtk) match = false;
+                if (f.def < minDef) match = false;
+                if (f.spa < minSpA) match = false;
+                if (f.spd < minSpD) match = false;
+                if (f.spe < minSpe) match = false;
+                if (match) filtered.add(f);
+            }
             updateFusionTable(filtered); 
             log("Filter applied. Showing " + filtered.size() + " fusions.");
             dlg.dispose();
         }, true);
-        
         JPanel btnP = new JPanel(); btnP.add(apply);
         dlg.add(new JLabel("")); dlg.add(btnP);
         dlg.pack();
         dlg.setLocationRelativeTo(frame);
         dlg.setVisible(true);
     }
+    
+    private int parseIntSafe(String s) {
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; }
+    }
 
-    // --- HELPER METHODS ---
     private TitledBorder createStyledBorder(String title) {
         TitledBorder border = BorderFactory.createTitledBorder(
             BorderFactory.createLineBorder(new Color(200, 200, 200), 1), title);
@@ -375,25 +467,13 @@ public class UIComponents {
         btn.setFont(BTN_FONT);
         btn.setFocusPainted(false);
         btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        
-        // UPDATED: Buttons are now Black with White text
         btn.setBackground(BTN_BG);
         btn.setForeground(BTN_FG);
-        
         btn.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(BTN_BORDER, 1),
             BorderFactory.createEmptyBorder(8, 16, 8, 16)));
         btn.addActionListener(e -> action.run());
         return btn;
-    }
-    
-    private JPanel createSpinnerRow(String label, JSpinner spinner) {
-        JPanel p = new JPanel(new BorderLayout(10, 0));
-        p.setBackground(Color.WHITE);
-        p.setMaximumSize(new Dimension(400, 30));
-        p.add(new JLabel(label), BorderLayout.WEST);
-        p.add(spinner, BorderLayout.CENTER);
-        return p;
     }
     
     public void log(String msg) {
@@ -567,44 +647,36 @@ public class UIComponents {
             log("!!! Calculation Cancelled !!!");
             return;
         }
-
         if (modelRoster.isEmpty()) {
             JOptionPane.showMessageDialog(frame, "Roster is empty!", "Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
-
         currentTask = new TaskController();
         isCalculating.set(true);
         log("=== STARTING CALCULATION (Click again to Cancel) ===");
         log("Generating exhaustive ability combinations...");
-        
         new Thread(() -> {
             List<Pokemon> roster = new ArrayList<>();
             for (int i = 0; i < modelRoster.getSize(); i++) {
                 roster.add(data.pokemon.get(modelRoster.getElementAt(i)));
             }
-
             ScoringWeights weights = new ScoringWeights(
                 sldStatWeight.getValue() / 100.0,
                 sldTypeWeight.getValue() / 100.0,
                 sldAbilityWeight.getValue() / 100.0,
                 sldMoveWeight.getValue() / 100.0
             );
-
             FusionPool pool = new FusionPool();
             int approximatePairs = roster.size() * roster.size();
-
             calculator.calculateAll(roster, weights, chkHiddenPenalty.isSelected(), pool, currentTask, (count) -> {
                  SwingUtilities.invokeLater(() -> {
                      calcProgress.setValue((int)((count / (float)approximatePairs) * 100));
                      calcProgress.setString("Pairs: " + count + " / " + approximatePairs);
                  });
             });
-
             if (!currentTask.isCancelled()) {
                 pool.sort();
                 List<Fusion> results = pool.getList();
-                
                 SwingUtilities.invokeLater(() -> {
                     updateFusionTable(results);
                     this.calculatedFusions = results;
@@ -614,98 +686,8 @@ public class UIComponents {
                     log("Note: Table contains every possible ability combination.");
                 });
             }
-            
             isCalculating.set(false);
             currentTask.finish();
-            
-        }).start();
-    }
-
-    private void runTeamBuilder() {
-        if (isBuilding.get()) {
-            JOptionPane.showMessageDialog(frame, "Team building already in progress!", 
-                "Busy", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        
-        if (calculatedFusions.isEmpty()) {
-            JOptionPane.showMessageDialog(frame, 
-                "Run 'Calculate All Fusions' first!", "No Data", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        
-        // Reset current task
-        if (currentTask != null) currentTask.cancel();
-        currentTask = new TaskController();
-
-        isBuilding.set(true);
-        teamProgress.setValue(0);
-        
-        // MODIFIED: Use the new simplified config for Branch & Bound
-        TeamBuildConfig config = new TeamBuildConfig(
-            chkAllowSameSpeciesInTeam.isSelected(), 
-            chkSharedTypes.isSelected(),
-            chkSelfFusion.isSelected()
-        );
-        
-        new Thread(() -> {
-            log("\n=== TEAM BUILDING STARTED (Deterministic) ===");
-            log("Constraints: Species Dupes=" + config.allowSameSpeciesInTeam + ", Shared Types=" + config.allowSharedTypes);
-            
-            long start = System.currentTimeMillis();
-            
-            // Pass the currentTask to support cancellation
-            List<Team> teams = teamBuilder.buildTeams(calculatedFusions, pinnedFusions, config, currentTask,
-                (current, total) -> {
-                    SwingUtilities.invokeLater(() -> {
-                        teamProgress.setValue((int)((current / (float)total) * 100));
-                        teamProgress.setString("Branches Checked: " + current);
-                    });
-                });
-            
-            // Note: TeamBuilder already returns sorted results, but usually just one best team
-            
-            SwingUtilities.invokeLater(() -> {
-                teamTableModel.setRowCount(0);
-                
-                if (teams.isEmpty()) {
-                    log("Warning: No valid teams found!"); 
-                } else {
-                    for (int i = 0; i < teams.size(); i++) {
-                        Team t = teams.get(i);
-                        String balanceInfo = t.balanceBonus != 0 ? 
-                            String.format(" (div: %+.2f)", t.balanceBonus) : "";
-                        
-                        teamTableModel.addRow(new Object[]{
-                            "Team " + (i+1) + balanceInfo, "", "", "", "", "", 
-                            String.format("%.3f", t.realScore)
-                        });
-                        
-                        // Sort members by individual score desc
-                        t.members.sort((a, b) -> Double.compare(b.score, a.score));
-                        
-                        for (Fusion f : t.members) {
-                            teamTableModel.addRow(new Object[]{
-                                "", cap(f.headName), cap(f.bodyName), f.typing, 
-                                f.chosenAbility, f.role, f.score
-                            });
-                        }
-                        teamTableModel.addRow(new Object[]{"", "", "", "", "", "", ""});
-                    }
-                    
-                    // Update Strategy Panel with best team
-                    if (!teams.isEmpty()) {
-                        strategyPanel.displayTeam(teams.get(0));
-                    }
-                }
-                
-                teamProgress.setValue(100);
-                teamProgress.setString("Complete! Found optimal team.");
-                
-                long elapsed = System.currentTimeMillis() - start;
-                log("Search complete in " + elapsed + "ms");
-                isBuilding.set(false);
-            });
         }).start();
     }
 
@@ -1078,9 +1060,9 @@ public class UIComponents {
     }
 
     private void resetTeamSettings() {
-        chkAllowSameSpeciesInTeam.setSelected(false);
-        chkSharedTypes.setSelected(false);
-        chkSelfFusion.setSelected(false);
+        sldSpeciesClause.setValue(100);
+        sldTypeClause.setValue(50);
+        sldSelfFusion.setValue(0);
         log("Team settings reset to defaults");
     }
 
@@ -1096,10 +1078,10 @@ public class UIComponents {
         sb.append(String.format("   * Type Synergy:    %.2f\n", sldTypeWeight.getValue() / total));
         sb.append(String.format("   * Ability:         %.2f\n", sldAbilityWeight.getValue() / total));
         sb.append(String.format("   * Moveset:         %.2f\n\n", sldMoveWeight.getValue() / total));
-        sb.append("ALGORITHM: BRANCH AND BOUND\n");
+        sb.append("ALGORITHM: OPTIMIZED BRANCH AND BOUND\n");
         sb.append("   * Sorts fusions by Base Score\n");
-        sb.append("   * Prunes impossible branches\n");
-        sb.append("   * Guarantees Global Maximum\n\n");
+        sb.append("   * Focuses on Top 120 Candidates for speed\n");
+        sb.append("   * Prunes impossible branches instantly\n\n");
         sb.append("TEAM BALANCE:\n");
         sb.append("   * Role diversity bonus applied\n");
         sb.append("   * Shared weakness penalties applied\n");
@@ -1107,6 +1089,8 @@ public class UIComponents {
         txtAlgoInfo.setText(sb.toString());
     }
 
+    // ... [showPokedexEntry, PokemonListRenderer, initializeData remain same] ...
+    
     private void showPokedexEntry(String name) {
         if (name == null) return;
         Pokemon p = data.pokemon.get(name);
@@ -1153,7 +1137,6 @@ public class UIComponents {
         }
         sb.append("========================================");
         
-        // Check if legendary
         if (legendarySet.contains(name.toLowerCase())) {
             sb.append("\n   ✨ LEGENDARY/MYTHICAL POKÉMON ✨");
         }
@@ -1162,7 +1145,6 @@ public class UIComponents {
         loadSprite(p.name);
     }
     
-    // Class for Pokemon List Renderer
     class PokemonListRenderer extends JPanel implements ListCellRenderer<String> {
         private JLabel nameLabel = new JLabel();
         private JLabel iconLabel = new JLabel();
