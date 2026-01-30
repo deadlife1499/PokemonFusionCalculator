@@ -20,7 +20,7 @@ class DataManager {
         
         // Initialize new systems
         synergy = new SynergyManager("synergies.csv");
-        sprites = new SpriteManager("pokedex_ids.csv");
+        sprites = new SpriteManager("pokedex_data.csv");
     }
     
     public String getDatabaseStats() {
