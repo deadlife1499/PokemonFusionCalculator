@@ -1,545 +1,320 @@
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
-class TeamBuilder {
+public class TeamBuilder {
     private final DataManager data;
     
-    // Type Chart Matrix (Attacker Rows -> Defender Cols)
-    // 0: Normal, 1: Fire, 2: Water, 3: Electric, 4: Grass, 5: Ice, 6: Fighting, 7: Poison, 8: Ground, 
-    // 9: Flying, 10: Psychic, 11: Bug, 12: Rock, 13: Ghost, 14: Dragon, 15: Dark, 16: Steel, 17: Fairy
-    public static final double[][] TYPE_CHART = new double[18][18]; 
+    // Theoretical maximum bonus a team can gain from "Secondary Info" (Role diversity, etc.)
+    // Used for the pruning "ceiling". 
+    // +1.5 for Role Diversity is the main positive factor. 
+    // Penalties are negative, so we assume a perfect team has 0 penalties.
+    // We add a safety margin to ensure we never prune a valid solution.
+    private static final double MAX_POSSIBLE_DELTA = 2.0;
 
-    static {
-        // Initialize neutral
-        for(double[] row : TYPE_CHART) Arrays.fill(row, 1.0);
-    }
+    // Shared global maximum score for pruning across all threads
+    private volatile double globalMaxScore = -Double.MAX_VALUE;
+    private final Object resultLock = new Object();
+    private Team globalBestTeam = null;
 
     public TeamBuilder(DataManager data) {
         this.data = data;
     }
 
+    /**
+     * Main entry point for the Team Builder.
+     */
     public List<Team> buildTeams(List<Fusion> fusions, Set<Fusion> pinnedFusions, TeamBuildConfig config, 
                                TaskController task, BiConsumer<Integer, Integer> progressCallback) {
         
-        // Filter pool based on constraints
+        System.out.println("Starting Deterministic Branch and Bound Search...");
+        long startTime = System.currentTimeMillis();
+
+        // 1. PREPARE & SORT DATA (Step A)
         List<Fusion> pool = new ArrayList<>(fusions);
+        
+        // Apply basic filtering
         if (!config.allowSelfFusion) {
             pool.removeIf(f -> f.headName.equalsIgnoreCase(f.bodyName));
         }
-
-        // Choose algorithm based on exhaustiveness setting
-        switch (config.exhaustiveMode) {
-            case 0: // Speed Mode - Fast greedy with light optimization
-                return buildTeamsSpeed(pool, pinnedFusions, config, task, progressCallback);
-            
-            case 1: // Balanced Mode - Hybrid approach
-                return buildTeamsBalanced(pool, pinnedFusions, config, task, progressCallback);
-            
-            case 2: // Quality Mode - Deep search with pruning
-                return buildTeamsQuality(pool, pinnedFusions, config, task, progressCallback);
-            
-            case 3: // Maximum Mode - Exhaustive deterministic search
-                return buildTeamsMaximum(pool, pinnedFusions, config, task, progressCallback);
-            
-            default:
-                return buildTeamsBalanced(pool, pinnedFusions, config, task, progressCallback);
-        }
-    }
-
-    // ==================== SPEED MODE ====================
-    // Fast greedy approach with minimal iterations
-    private List<Team> buildTeamsSpeed(List<Fusion> pool, Set<Fusion> pinnedFusions, TeamBuildConfig config,
-                                       TaskController task, BiConsumer<Integer, Integer> progressCallback) {
-        List<Team> teams = new ArrayList<>();
+        
+        // Essential: Sort by BaseScore Descending for the Branch and Bound to work
         pool.sort((a, b) -> Double.compare(b.score, a.score));
-        List<Fusion> availablePool = new ArrayList<>(pool.subList(0, Math.min(pool.size(), 1500)));
-        
-        for (int i = 0; i < config.numTeams; i++) {
-            if (task.isCancelled()) break;
-            progressCallback.accept(i + 1, config.numTeams);
-            
-            Team team = buildGreedyTeam(availablePool, pinnedFusions, config, 500);
-            if (team != null) {
-                team.recalculateRealScore();
-                teams.add(team);
-                availablePool.removeAll(team.members);
-            }
-        }
-        
-        return teams;
-    }
 
-    // ==================== BALANCED MODE ====================
-    // Hybrid: Greedy initialization + Hill climbing
-    private List<Team> buildTeamsBalanced(List<Fusion> pool, Set<Fusion> pinnedFusions, TeamBuildConfig config,
-                                          TaskController task, BiConsumer<Integer, Integer> progressCallback) {
-        List<Team> teams = new ArrayList<>();
-        pool.sort((a, b) -> Double.compare(b.score, a.score));
-        List<Fusion> availablePool = new ArrayList<>(pool.subList(0, Math.min(pool.size(), 2500)));
-        
-        for (int i = 0; i < config.numTeams; i++) {
-            if (task.isCancelled()) break;
-            progressCallback.accept(i + 1, config.numTeams);
-            
-            // Start with greedy
-            Team team = buildGreedyTeam(availablePool, pinnedFusions, config, 1000);
-            
-            // Refine with hill climbing
-            if (team != null) {
-                team = hillClimbOptimize(team, availablePool, config, 2000);
-                team.recalculateRealScore();
-                teams.add(team);
-                availablePool.removeAll(team.members);
-            }
-        }
-        
-        return teams;
-    }
+        // Handle Pinned Fusions
+        List<Fusion> pinnedList = pinnedFusions != null ? new ArrayList<>(pinnedFusions) : new ArrayList<>();
+        // Remove pinned members from the pool so we don't pick them twice
+        pool.removeAll(pinnedList);
 
-    // ==================== QUALITY MODE ====================
-    // Deep search with beam search and pruning
-    private List<Team> buildTeamsQuality(List<Fusion> pool, Set<Fusion> pinnedFusions, TeamBuildConfig config,
-                                         TaskController task, BiConsumer<Integer, Integer> progressCallback) {
-        List<Team> teams = new ArrayList<>();
-        pool.sort((a, b) -> Double.compare(b.score, a.score));
-        List<Fusion> availablePool = new ArrayList<>(pool.subList(0, Math.min(pool.size(), 4000)));
-        
-        for (int i = 0; i < config.numTeams; i++) {
-            if (task.isCancelled()) break;
-            progressCallback.accept(i + 1, config.numTeams);
-            
-            // Use beam search to explore multiple promising paths
-            Team team = beamSearchTeam(availablePool, pinnedFusions, config, 8, 5000);
-            
-            if (team != null) {
-                team.recalculateRealScore();
-                teams.add(team);
-                availablePool.removeAll(team.members);
-            }
-        }
-        
-        return teams;
-    }
+        // 2. ESTABLISH LOWER BOUND (Step B)
+        // Calculate the score of the "Greedy" top 6 to set an initial baseline (Smax)
+        initializeLowerBound(pool, pinnedList, config);
 
-    // ==================== MAXIMUM MODE ====================
-    // Exhaustive deterministic search with intelligent pruning
-    private List<Team> buildTeamsMaximum(List<Fusion> pool, Set<Fusion> pinnedFusions, TeamBuildConfig config,
-                                         TaskController task, BiConsumer<Integer, Integer> progressCallback) {
-        List<Team> teams = new ArrayList<>();
-        pool.sort((a, b) -> Double.compare(b.score, a.score));
+        // 3. PARALLEL ITERATIVE SEARCH (Step C)
+        // We split the search space. 
+        // Core 1 checks combinations starting with Pool[0]
+        // Core 2 checks combinations starting with Pool[1] (excluding Pool[0])
+        // ... and so on.
         
-        // Use full pool but with smart filtering
-        List<Fusion> availablePool = new ArrayList<>(pool);
-        
-        for (int i = 0; i < config.numTeams; i++) {
-            if (task.isCancelled()) break;
-            progressCallback.accept(i + 1, config.numTeams);
-            
-            // Deterministic exhaustive search with pruning
-            Team team = exhaustiveSearchTeam(availablePool, pinnedFusions, config, task);
-            
-            if (team != null) {
-                team.recalculateRealScore();
-                teams.add(team);
-                availablePool.removeAll(team.members);
-            }
-        }
-        
-        return teams;
-    }
+        int n = pool.size();
+        int k = 6 - pinnedList.size(); // Remaining slots to fill
 
-    // ==================== GREEDY TEAM BUILDER ====================
-    private Team buildGreedyTeam(List<Fusion> pool, Set<Fusion> pinnedFusions, TeamBuildConfig config, int iterations) {
-        Team team = new Team();
-        List<Fusion> available = new ArrayList<>(pool);
-        
-        // Add pinned fusions first
-        if (pinnedFusions != null) {
-            for (Fusion pinned : pinnedFusions) {
-                if (team.members.size() < 6) {
-                    team.members.add(pinned);
-                    available.remove(pinned);
-                }
-            }
+        if (k <= 0) {
+            // Edge case: User pinned 6 or more pokemon
+            Team t = new Team();
+            t.members.addAll(pinnedList.subList(0, 6));
+            t.recalculateRealScore();
+            return Collections.singletonList(t);
         }
-        
-        // Greedy selection for remaining slots
-        while (team.members.size() < 6 && !available.isEmpty()) {
-            Fusion best = null;
-            double bestScore = -9999;
-            
-            // Try top candidates
-            int candidatesToCheck = Math.min(iterations, available.size());
-            for (int i = 0; i < candidatesToCheck; i++) {
-                Fusion candidate = available.get(i);
-                
-                // Check constraints
-                if (!isValidAddition(team, candidate, config)) continue;
-                
-                // Evaluate score if added
-                Team testTeam = new Team();
-                testTeam.members.addAll(team.members);
-                testTeam.members.add(candidate);
-                double score = evaluateTeam(testTeam, config);
-                
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = candidate;
-                }
-            }
-            
-            if (best != null) {
-                team.members.add(best);
-                available.remove(best);
-            } else {
-                break;
-            }
-        }
-        
-        return team.members.size() == 6 ? team : null;
-    }
 
-    // ==================== HILL CLIMBING OPTIMIZER ====================
-    private Team hillClimbOptimize(Team initialTeam, List<Fusion> pool, TeamBuildConfig config, int iterations) {
-        Team current = new Team();
-        current.members.addAll(initialTeam.members);
-        double currentScore = evaluateTeam(current, config);
-        
-        for (int i = 0; i < iterations; i++) {
-            // Try swapping each position with pool members
-            boolean improved = false;
+        // Executor for parallel tasks
+        int cores = Runtime.getRuntime().availableProcessors();
+        ForkJoinPool customThreadPool = new ForkJoinPool(cores);
+        AtomicInteger completedTasks = new AtomicInteger(0);
+
+        try {
+            // optimization: We don't need to check EVERY index as a start.
+            // If the base score of pool[i] is so low that even with perfect future picks 
+            // we can't beat the globalMax, we stop creating new tasks.
+            // However, inside the parallel stream, we let the internal pruning handle this logic 
+            // to keep the outer loop clean.
             
-            for (int pos = 0; pos < current.members.size(); pos++) {
-                Fusion original = current.members.get(pos);
-                
-                // Try top candidates from pool
-                for (int candidateIdx = 0; candidateIdx < Math.min(50, pool.size()); candidateIdx++) {
-                    Fusion candidate = pool.get(candidateIdx);
-                    if (current.members.contains(candidate)) continue;
+            customThreadPool.submit(() -> 
+                IntStream.range(0, n).parallel().forEach(i -> {
+                    if (task.isCancelled()) return;
+
+                    // Pruning at the root level:
+                    // If starting with this pokemon makes it mathematically impossible to win, skip.
+                    double currentBase = 0;
+                    for(Fusion p : pinnedList) currentBase += p.score;
+                    currentBase += pool.get(i).score;
                     
-                    // Swap
-                    current.members.set(pos, candidate);
-                    
-                    if (!isValidTeam(current, config)) {
-                        current.members.set(pos, original);
-                        continue;
+                    if (canPrune(currentBase, i, k - 1, pool)) {
+                        return; // Skip this branch entirely
                     }
+
+                    // Start the recursive solver for this branch
+                    // We create a new list for the current path to ensure thread safety
+                    List<Fusion> currentMembers = new ArrayList<>(pinnedList);
+                    currentMembers.add(pool.get(i));
                     
-                    double newScore = evaluateTeam(current, config);
+                    solveBranch(pool, currentMembers, currentBase, i, config, task);
                     
-                    if (newScore > currentScore) {
-                        currentScore = newScore;
-                        improved = true;
-                        break; // Keep this swap
-                    } else {
-                        current.members.set(pos, original);
+                    // Update progress (rough estimate)
+                    int done = completedTasks.incrementAndGet();
+                    if (done % 100 == 0 || done == n) {
+                        progressCallback.accept(done, n);
                     }
-                }
-                
-                if (improved) break;
-            }
+                })
+            ).get();
             
-            if (!improved) break; // Local maximum reached
+        } catch (InterruptedException | ExecutionException e) {
+            e.printStackTrace();
+        }
+
+        long duration = System.currentTimeMillis() - startTime;
+        System.out.println("Search finished in " + duration + "ms. Best Score: " + globalMaxScore);
+
+        if (globalBestTeam != null) {
+            // Return only the absolute best team found
+            return Collections.singletonList(globalBestTeam);
         }
         
-        return current;
+        return new ArrayList<>();
     }
 
-    // ==================== BEAM SEARCH ====================
-    private Team beamSearchTeam(List<Fusion> pool, Set<Fusion> pinnedFusions, TeamBuildConfig config, 
-                                int beamWidth, int maxExpansions) {
-        // Beam search maintains top K partial teams at each step
-        List<PartialTeam> beam = new ArrayList<>();
+    /**
+     * Step B: Establish a "Lower Bound" quickly using the top available fusions.
+     */
+    private void initializeLowerBound(List<Fusion> pool, List<Fusion> pinned, TeamBuildConfig config) {
+        Team greedyTeam = new Team();
+        greedyTeam.members.addAll(pinned);
         
-        // Initialize with pinned fusions or empty
-        PartialTeam initial = new PartialTeam();
-        if (pinnedFusions != null) {
-            initial.members.addAll(pinnedFusions);
-        }
-        beam.add(initial);
-        
-        int expansions = 0;
-        
-        // Build teams slot by slot
-        while (beam.get(0).members.size() < 6 && expansions < maxExpansions) {
-            List<PartialTeam> candidates = new ArrayList<>();
-            
-            for (PartialTeam partial : beam) {
-                if (partial.members.size() == 6) {
-                    candidates.add(partial);
-                    continue;
-                }
-                
-                // Expand with top fusion candidates
-                for (int i = 0; i < Math.min(beamWidth * 3, pool.size()); i++) {
-                    Fusion candidate = pool.get(i);
-                    if (partial.members.contains(candidate)) continue;
-                    
-                    PartialTeam newPartial = new PartialTeam();
-                    newPartial.members.addAll(partial.members);
-                    newPartial.members.add(candidate);
-                    
-                    if (isValidTeam(convertToTeam(newPartial), config)) {
-                        newPartial.score = evaluatePartialTeam(newPartial, config);
-                        candidates.add(newPartial);
-                        expansions++;
-                    }
-                }
-            }
-            
-            // Keep top beamWidth candidates
-            candidates.sort((a, b) -> Double.compare(b.score, a.score));
-            beam = candidates.subList(0, Math.min(beamWidth, candidates.size()));
-            
-            if (beam.isEmpty()) break;
+        int needed = 6 - greedyTeam.members.size();
+        for (int i = 0; i < Math.min(needed, pool.size()); i++) {
+            greedyTeam.members.add(pool.get(i));
         }
         
-        return beam.isEmpty() ? null : convertToTeam(beam.get(0));
+        if (greedyTeam.members.size() == 6) {
+            double score = calculateTotalScore(greedyTeam.members, config);
+            updateGlobalBest(score, greedyTeam);
+        }
     }
 
-    // ==================== EXHAUSTIVE SEARCH (MAXIMUM MODE) ====================
-    private Team exhaustiveSearchTeam(List<Fusion> pool, Set<Fusion> pinnedFusions, 
-                                      TeamBuildConfig config, TaskController task) {
-        // Use dynamic programming with memoization for exhaustive search
-        // This finds the provably optimal team within constraints
+    /**
+     * Step C: Recursive Branch and Bound Solver.
+     * * @param pool The full sorted list of candidates.
+     * @param currentTeam The members currently in this group.
+     * @param currentBaseScore The sum of base scores of members in currentTeam.
+     * @param lastIndex The index in 'pool' of the last added member (to ensure forward iteration).
+     */
+    private void solveBranch(List<Fusion> pool, List<Fusion> currentTeam, double currentBaseScore, 
+                             int lastIndex, TeamBuildConfig config, TaskController task) {
         
-        List<Fusion> candidates = new ArrayList<>();
-        
-        // Smart pre-filtering: only consider top fusions and those with unique strengths
-        Set<String> uniqueTypes = new HashSet<>();
-        Set<String> uniqueAbilities = new HashSet<>();
-        
-        for (Fusion f : pool) {
-            // Always include high-scoring fusions
-            if (f.score >= 0.75) {
-                candidates.add(f);
-            }
-            // Include if brings unique type coverage
-            else if (!uniqueTypes.contains(f.typing)) {
-                candidates.add(f);
-                uniqueTypes.add(f.typing);
-            }
-            // Include if brings unique strong ability
-            else if (f.score >= 0.65 && !uniqueAbilities.contains(f.chosenAbility)) {
-                candidates.add(f);
-                uniqueAbilities.add(f.chosenAbility);
-            }
-            
-            // Cap candidate pool to keep search tractable
-            if (candidates.size() >= 500) break;
-        }
-        
-        System.out.println("Exhaustive search over " + candidates.size() + " candidates");
-        
-        // Start with pinned fusions
-        List<Fusion> fixed = pinnedFusions != null ? new ArrayList<>(pinnedFusions) : new ArrayList<>();
-        List<Fusion> flexible = new ArrayList<>(candidates);
-        flexible.removeAll(fixed);
-        
-        int slotsToFill = 6 - fixed.size();
-        
-        // Use iterative deepening with branch and bound
-        Team best = exhaustiveRecursive(fixed, flexible, slotsToFill, config, -9999, task);
-        
-        return best;
-    }
+        if (task.isCancelled()) return;
 
-    private Team exhaustiveRecursive(List<Fusion> fixed, List<Fusion> available, int slotsRemaining,
-                                     TeamBuildConfig config, double currentBest, TaskController task) {
-        if (task.isCancelled()) return null;
-        
-        if (slotsRemaining == 0) {
-            Team complete = new Team();
-            complete.members.addAll(fixed);
-            complete.recalculateRealScore();
-            return complete;
+        // 1. Check if Team is Full
+        if (currentTeam.size() == 6) {
+            // Calculate final score including Delta (Synergy)
+            double delta = calculateDelta(currentTeam, config);
+            double finalScore = currentBaseScore + delta;
+            
+            if (finalScore > globalMaxScore) {
+                Team newBest = new Team();
+                newBest.members.addAll(currentTeam);
+                newBest.realScore = finalScore; // Cache the score
+                updateGlobalBest(finalScore, newBest);
+            }
+            return;
         }
+
+        // 2. PRUNING (The Ceiling Check)
+        int slotsRemaining = 6 - currentTeam.size();
         
-        Team bestTeam = null;
-        double bestScore = currentBest;
-        
-        // Try each remaining fusion
-        for (int i = 0; i < available.size(); i++) {
-            Fusion candidate = available.get(i);
-            
-            // Create new fixed set
-            List<Fusion> newFixed = new ArrayList<>(fixed);
-            newFixed.add(candidate);
-            
-            // Check if valid so far
-            Team partial = new Team();
-            partial.members.addAll(newFixed);
-            if (!isValidTeam(partial, config)) continue;
-            
-            // Prune: estimate upper bound score
-            double upperBound = estimateUpperBound(newFixed, available, slotsRemaining - 1);
-            if (upperBound <= bestScore) continue; // Branch and bound pruning
-            
-            // Create new available set
-            List<Fusion> newAvailable = new ArrayList<>(available.subList(i + 1, available.size()));
-            
+        // Check if we have enough candidates left
+        if (lastIndex + 1 >= pool.size()) return;
+
+        // PRUNING RULE:
+        // Max Possible Score = Current Base + (Sum of next best 'slotsRemaining' base scores) + Max Delta
+        // If this theoretical ceiling is <= globalMaxScore, we stop.
+        if (canPrune(currentBaseScore, lastIndex, slotsRemaining, pool)) {
+            return;
+        }
+
+        // 3. Branching
+        // Iterate through remaining candidates
+        for (int i = lastIndex + 1; i < pool.size(); i++) {
+            Fusion candidate = pool.get(i);
+
+            // Optimization: Validation check before recursion
+            // If adding this candidate violates hard constraints (Species/Types), skip immediately
+            if (!isValidAddition(currentTeam, candidate, config)) {
+                continue;
+            }
+
+            // Add candidate
+            currentTeam.add(candidate);
+            double newBaseScore = currentBaseScore + candidate.score;
+
             // Recurse
-            Team result = exhaustiveRecursive(newFixed, newAvailable, slotsRemaining - 1, config, bestScore, task);
-            
-            if (result != null && result.realScore > bestScore) {
-                bestScore = result.realScore;
-                bestTeam = result;
-            }
+            solveBranch(pool, currentTeam, newBaseScore, i, config, task);
+
+            // Backtrack
+            currentTeam.remove(currentTeam.size() - 1);
         }
-        
-        return bestTeam;
     }
 
-    private double estimateUpperBound(List<Fusion> current, List<Fusion> remaining, int slotsLeft) {
-        // Optimistic upper bound: current score + best possible additions
-        double currentScore = 0;
-        for (Fusion f : current) {
-            currentScore += f.score;
+    /**
+     * Determines if the current branch should be pruned based on the mathematical ceiling.
+     */
+    private boolean canPrune(double currentBase, int lastIndex, int slotsRemaining, List<Fusion> pool) {
+        double maxFutureBase = 0;
+        
+        // Sum the scores of the next best available fusions
+        // Since the list is sorted, picking the immediate next ones gives the highest possible base score
+        int count = 0;
+        for (int i = lastIndex + 1; i < pool.size() && count < slotsRemaining; i++) {
+            maxFutureBase += pool.get(i).score;
+            count++;
         }
         
-        // Add scores of top remaining fusions
-        double potentialBonus = 0;
-        for (int i = 0; i < Math.min(slotsLeft, remaining.size()); i++) {
-            potentialBonus += remaining.get(i).score;
+        // If we ran out of fusions to fill the team, we must stop
+        if (count < slotsRemaining) return true;
+
+        double theoreticalCeiling = currentBase + maxFutureBase + MAX_POSSIBLE_DELTA;
+        
+        // If the absolute best we can do is worse than what we already have, PRUNE.
+        return theoreticalCeiling <= globalMaxScore;
+    }
+
+    private synchronized void updateGlobalBest(double score, Team team) {
+        if (score > globalMaxScore) {
+            globalMaxScore = score;
+            globalBestTeam = team;
+            // System.out.println("New Best Found: " + String.format("%.2f", score)); // Optional logging
         }
-        
-        // Add maximum possible synergy bonus
-        double maxSynergy = 0.30; // Generous estimate
-        
-        return currentScore + potentialBonus + maxSynergy;
     }
 
-    // ==================== VALIDATION HELPERS ====================
-    private boolean isValidAddition(Team team, Fusion candidate, TeamBuildConfig config) {
-        Team testTeam = new Team();
-        testTeam.members.addAll(team.members);
-        testTeam.members.add(candidate);
-        return isValidTeam(testTeam, config);
+    // ==================== SCORING & DELTA LOGIC ==================== //
+
+    /**
+     * Calculates the objective function: Score(P) = Sum(Base) + Delta
+     */
+    private double calculateTotalScore(List<Fusion> members, TeamBuildConfig config) {
+        double baseSum = 0;
+        for (Fusion f : members) baseSum += f.score;
+        return baseSum + calculateDelta(members, config);
     }
 
-    private boolean isValidTeam(Team team, TeamBuildConfig config) {
-        // Check species constraint
+    /**
+     * Calculates "Delta" (Δ) - the adjustment based on profile differences (Synergy, Penalties).
+     */
+    private double calculateDelta(List<Fusion> members, TeamBuildConfig config) {
+        double delta = 0.0;
+
+        // --- Penalties (Hard constraints turned into soft penalties for scoring) ---
+        
+        // Species Clause (Don't use same pokemon twice)
         if (!config.allowSameSpeciesInTeam) {
             Set<String> species = new HashSet<>();
-            for (Fusion f : team.members) {
-                if (!species.add(f.headName.toLowerCase())) return false;
-                if (!species.add(f.bodyName.toLowerCase())) return false;
+            for (Fusion f : members) {
+                if (!species.add(f.headName.toLowerCase())) delta -= 5.0; // Heavy penalty
+                if (!species.add(f.bodyName.toLowerCase())) delta -= 5.0;
             }
         }
-        
-        // Check type sharing constraint
+
+        // Type Sharing (Don't stack too many of one type)
         if (!config.allowSharedTypes) {
             Map<String, Integer> typeCounts = new HashMap<>();
-            for (Fusion f : team.members) {
-                if (f.typing.contains("/")) {
-                    String[] parts = f.typing.split("/");
-                    typeCounts.put(parts[0], typeCounts.getOrDefault(parts[0], 0) + 1);
-                    typeCounts.put(parts[1], typeCounts.getOrDefault(parts[1], 0) + 1);
-                } else {
-                    typeCounts.put(f.typing, typeCounts.getOrDefault(f.typing, 0) + 1);
+            for (Fusion f : members) {
+                // Split dual types (e.g., "Fire/Flying")
+                String[] types = f.typing.contains("/") ? f.typing.split("/") : new String[]{f.typing};
+                for(String t : types) {
+                    typeCounts.put(t, typeCounts.getOrDefault(t, 0) + 1);
                 }
             }
             for (int count : typeCounts.values()) {
-                if (count > 2) return false;
-            }
-        }
-        
-        return true;
-    }
-
-    // ==================== EVALUATION FUNCTION ====================
-    private double evaluateTeam(Team team, TeamBuildConfig config) {
-        if (team.members.size() != 6) {
-            return evaluatePartialTeam(convertToPartial(team), config);
-        }
-        
-        double totalScore = 0.0;
-        
-        // 1. Sum of Individual Scores
-        for (Fusion f : team.members) totalScore += f.score;
-
-        // 2. Constraint Penalties
-        if (!config.allowSameSpeciesInTeam) {
-            Set<String> species = new HashSet<>();
-            for (Fusion f : team.members) {
-                if (!species.add(f.headName.toLowerCase())) totalScore -= 5.0;
-                if (!species.add(f.bodyName.toLowerCase())) totalScore -= 5.0;
+                if (count > 2) delta -= (count * 2.0);
             }
         }
 
-        if (!config.allowSharedTypes) {
-            Map<String, Integer> typeCounts = new HashMap<>();
-            for (Fusion f : team.members) {
-                if (f.typing.contains("/")) {
-                    String[] parts = f.typing.split("/");
-                    typeCounts.put(parts[0], typeCounts.getOrDefault(parts[0], 0) + 1);
-                    typeCounts.put(parts[1], typeCounts.getOrDefault(parts[1], 0) + 1);
-                } else {
-                    typeCounts.put(f.typing, typeCounts.getOrDefault(f.typing, 0) + 1);
-                }
-            }
-            for (int count : typeCounts.values()) {
-                if (count > 2) totalScore -= (count * 2.0);
-            }
-        }
-
-        // 3. Synergy & Balance
-        int[] weaknesses = new int[18];
-        for (Fusion f : team.members) {
+        // Defensive Coverage (Penalize shared weaknesses)
+        // Bitmask checking is extremely fast
+        int[] sharedWeaknesses = new int[18];
+        for (Fusion f : members) {
             for (int i = 0; i < 18; i++) {
-                if (((f.weaknessMask >> i) & 1) == 1) weaknesses[i]++;
+                if (((f.weaknessMask >> i) & 1) == 1) sharedWeaknesses[i]++;
             }
         }
-        
-        for (int w : weaknesses) {
-            if (w > 2) totalScore -= (w * 0.5);
+        for (int count : sharedWeaknesses) {
+            if (count > 2) delta -= (count * 0.5);
         }
 
-        // Role Diversity
-        Set<String> roles = team.members.stream().map(f -> f.role).collect(Collectors.toSet());
-        if (roles.size() >= 5) totalScore += 1.5;
-        else if (roles.size() >= 4) totalScore += 0.8;
+        // --- Bonuses (Synergy) ---
 
-        return totalScore;
+        // Role Diversity (Rewarding a balanced team)
+        Set<String> roles = members.stream().map(f -> f.role).collect(Collectors.toSet());
+        if (roles.size() >= 5) delta += 1.5;
+        else if (roles.size() >= 4) delta += 0.8;
+
+        return delta;
     }
 
-    private double evaluatePartialTeam(PartialTeam partial, TeamBuildConfig config) {
-        Team temp = convertToTeam(partial);
-        double score = 0;
-        
-        for (Fusion f : temp.members) {
-            score += f.score;
-        }
-        
-        // Lighter penalties for partial teams
+    private boolean isValidAddition(List<Fusion> current, Fusion candidate, TeamBuildConfig config) {
+        // Fast fail for strict mode constraints to save recursion depth
         if (!config.allowSameSpeciesInTeam) {
-            Set<String> species = new HashSet<>();
-            for (Fusion f : temp.members) {
-                if (!species.add(f.headName.toLowerCase())) score -= 2.0;
-                if (!species.add(f.bodyName.toLowerCase())) score -= 2.0;
+            for(Fusion f : current) {
+                if (f.headName.equalsIgnoreCase(candidate.headName) || 
+                    f.headName.equalsIgnoreCase(candidate.bodyName) ||
+                    f.bodyName.equalsIgnoreCase(candidate.headName) ||
+                    f.bodyName.equalsIgnoreCase(candidate.bodyName)) {
+                    return false;
+                }
             }
         }
-        
-        return score;
-    }
-
-    // ==================== HELPER CLASSES ====================
-    private static class PartialTeam {
-        List<Fusion> members = new ArrayList<>();
-        double score = 0.0;
-    }
-
-    private Team convertToTeam(PartialTeam partial) {
-        Team team = new Team();
-        team.members.addAll(partial.members);
-        return team;
-    }
-
-    private PartialTeam convertToPartial(Team team) {
-        PartialTeam partial = new PartialTeam();
-        partial.members.addAll(team.members);
-        return partial;
+        return true;
     }
 }

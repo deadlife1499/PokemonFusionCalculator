@@ -1,7 +1,3 @@
-import javax.swing.*;
-import javax.swing.border.*;
-import javax.swing.event.*;
-import javax.swing.table.*;
 import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.*;
@@ -12,6 +8,10 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.imageio.ImageIO;
+import javax.swing.*;
+import javax.swing.border.*;
+import javax.swing.event.*;
+import javax.swing.table.*;
 
 public class UIComponents {
     private final JFrame frame;
@@ -30,13 +30,11 @@ public class UIComponents {
     private JLabel lblDexImage;
     private JProgressBar progressBar, calcProgress, teamProgress;
     
-    // New Component: Strategy Heatmap
+    // Strategy Heatmap
     private StrategyPanel strategyPanel;
 
-    // Settings - MODIFIED: Replaced chkExhaustive with cmbAlgorithmMode
+    // Settings - MODIFIED: Removed obsolete genetic algorithm controls
     private JCheckBox chkHiddenPenalty, chkAllowSameSpeciesInTeam, chkSharedTypes, chkSelfFusion;
-    private JComboBox<String> cmbAlgorithmMode;
-    private JSpinner spinNumTeams, spinIterations, spinRandomness;
     private JSlider sldStatWeight, sldTypeWeight, sldAbilityWeight, sldMoveWeight;
     private JLabel lblStatW, lblTypeW, lblAbiW, lblMoveW;
     
@@ -48,6 +46,11 @@ public class UIComponents {
     private TaskController currentTask;
     
     private static final Font BTN_FONT = new Font("Segoe UI", Font.BOLD, 12);
+    // Modified Colors for Dark Buttons
+    private static final Color BTN_BG = Color.BLACK;
+    private static final Color BTN_FG = Color.WHITE;
+    private static final Color BTN_BORDER = new Color(60, 60, 60);
+    
     private static final Color ACCENT = new Color(79, 70, 229);
     private static final Color BG_DARK = new Color(30, 30, 30);
     private static final Color BG_LIGHT = new Color(250, 250, 250);
@@ -92,7 +95,7 @@ public class UIComponents {
         panel.setBackground(BG_DARK);
         panel.setBorder(new EmptyBorder(10, 15, 10, 15));
         
-        JLabel title = new JLabel("Infinite Fusion Calculator");
+        JLabel title = new JLabel("Infinite Fusion Calculator - Deterministic Engine");
         title.setForeground(Color.WHITE);
         title.setFont(new Font("Segoe UI", Font.BOLD, 20));
         
@@ -257,43 +260,11 @@ public class UIComponents {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setBackground(Color.WHITE);
-        panel.setBorder(createStyledBorder("Team Builder Settings"));
+        panel.setBorder(createStyledBorder("Team Constraints"));
         
-        spinNumTeams = new JSpinner(new SpinnerNumberModel(5, 1, 50, 1));
-        spinIterations = new JSpinner(new SpinnerNumberModel(2000, 100, 50000, 500));
-        spinRandomness = new JSpinner(new SpinnerNumberModel(3, 1, 20, 1));
-        
-        panel.add(createSpinnerRow("Number of Teams:", spinNumTeams));
-        panel.add(Box.createVerticalStrut(5));
-        panel.add(createSpinnerRow("Iterations per Team:", spinIterations));
-        panel.add(Box.createVerticalStrut(5));
-        panel.add(createSpinnerRow("Selection Randomness:", spinRandomness));
-        panel.add(Box.createVerticalStrut(10));
-        
-        // NEW: Algorithm mode dropdown instead of checkbox
-        JPanel algoPanel = new JPanel(new BorderLayout(10, 0));
-        algoPanel.setBackground(Color.WHITE);
-        algoPanel.setMaximumSize(new Dimension(400, 30));
-        JLabel lblAlgo = new JLabel("Algorithm Mode:");
-        lblAlgo.setFont(new Font("Segoe UI", Font.BOLD, 12));
-        algoPanel.add(lblAlgo, BorderLayout.WEST);
-        
-        String[] modes = {
-            "Speed (Fast, Good Results)",
-            "Balanced (Medium Speed, Better Results)", 
-            "Quality (Slower, Great Results)",
-            "Maximum (Slowest, Guaranteed Optimal)"
-        };
-        cmbAlgorithmMode = new JComboBox<>(modes);
-        cmbAlgorithmMode.setSelectedIndex(1); // Default to Balanced
-        cmbAlgorithmMode.setFont(new Font("Segoe UI", Font.PLAIN, 11));
-        algoPanel.add(cmbAlgorithmMode, BorderLayout.CENTER);
-        
-        panel.add(algoPanel);
-        panel.add(Box.createVerticalStrut(10));
-        
+        // Constraints
         chkAllowSameSpeciesInTeam = new JCheckBox("Allow Multiple of Same Species");
-        chkSharedTypes = new JCheckBox("Allow Shared Types Within One Team");
+        chkSharedTypes = new JCheckBox("Allow Shared Types (No Diversity Bonus)");
         chkSelfFusion = new JCheckBox("Allow Self-Fusions");
         
         // Add checkboxes
@@ -304,8 +275,9 @@ public class UIComponents {
             panel.add(Box.createVerticalStrut(5));
         }
         
-        panel.add(Box.createVerticalStrut(5));
-        JButton btnBuild = createButton("2. Build Optimal Teams", this::runTeamBuilder, true);
+        panel.add(Box.createVerticalStrut(10));
+        
+        JButton btnBuild = createButton("2. Find Optimal Team", this::runTeamBuilder, true);
         btnBuild.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(btnBuild);
         panel.add(Box.createVerticalStrut(8));
@@ -316,11 +288,6 @@ public class UIComponents {
         teamProgress.setMaximumSize(new Dimension(400, 20));
         teamProgress.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.add(teamProgress);
-        panel.add(Box.createVerticalStrut(8));
-        
-        JButton btnReset = createButton("Reset to Defaults", this::resetTeamSettings, false);
-        btnReset.setAlignmentX(Component.LEFT_ALIGNMENT);
-        panel.add(btnReset);
         
         return panel;
     }
@@ -368,8 +335,7 @@ public class UIComponents {
         dlg.add(new JLabel("Min Sp. Def:")); dlg.add(txtSpD);
         dlg.add(new JLabel("Min Speed:")); dlg.add(txtSpe);
         
-        JButton apply = new JButton("Apply Filter");
-        apply.addActionListener(e -> {
+        JButton apply = createButton("Apply Filter", () -> {
             FusionFilter filter = new FusionFilter();
             filter.typeConstraint = txtType.getText();
             filter.abilityConstraint = txtAbility.getText();
@@ -386,7 +352,7 @@ public class UIComponents {
             updateFusionTable(filtered); 
             log("Filter applied. Showing " + filtered.size() + " fusions.");
             dlg.dispose();
-        });
+        }, true);
         
         JPanel btnP = new JPanel(); btnP.add(apply);
         dlg.add(new JLabel("")); dlg.add(btnP);
@@ -409,11 +375,13 @@ public class UIComponents {
         btn.setFont(BTN_FONT);
         btn.setFocusPainted(false);
         btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        btn.setBackground(primary ? ACCENT : Color.WHITE);
-        // FIX: User requested BLACK text
-        btn.setForeground(primary ? Color.WHITE : Color.BLACK); 
+        
+        // UPDATED: Buttons are now Black with White text
+        btn.setBackground(BTN_BG);
+        btn.setForeground(BTN_FG);
+        
         btn.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(primary ? ACCENT : new Color(200, 200, 200), 1),
+            BorderFactory.createLineBorder(BTN_BORDER, 1),
             BorderFactory.createEmptyBorder(8, 16, 8, 16)));
         btn.addActionListener(e -> action.run());
         return btn;
@@ -673,34 +641,29 @@ public class UIComponents {
         isBuilding.set(true);
         teamProgress.setValue(0);
         
+        // MODIFIED: Use the new simplified config for Branch & Bound
         TeamBuildConfig config = new TeamBuildConfig(
-            (Integer) spinNumTeams.getValue(),
-            (Integer) spinIterations.getValue(),
-            (Integer) spinRandomness.getValue(),
             chkAllowSameSpeciesInTeam.isSelected(), 
             chkSharedTypes.isSelected(),
-            chkSelfFusion.isSelected(),
-            cmbAlgorithmMode.getSelectedIndex()  // 0=Speed, 1=Balanced, 2=Quality, 3=Maximum
+            chkSelfFusion.isSelected()
         );
         
         new Thread(() -> {
-            log("\n=== TEAM BUILDING STARTED ===");
-            String[] modeNames = {"Speed", "Balanced", "Quality", "Maximum (Exhaustive)"};
-            log("Algorithm: " + modeNames[config.exhaustiveMode]);
+            log("\n=== TEAM BUILDING STARTED (Deterministic) ===");
             log("Constraints: Species Dupes=" + config.allowSameSpeciesInTeam + ", Shared Types=" + config.allowSharedTypes);
             
             long start = System.currentTimeMillis();
             
-            // Pass the currentTask to support cancellation if you add a Cancel button later
+            // Pass the currentTask to support cancellation
             List<Team> teams = teamBuilder.buildTeams(calculatedFusions, pinnedFusions, config, currentTask,
                 (current, total) -> {
                     SwingUtilities.invokeLater(() -> {
                         teamProgress.setValue((int)((current / (float)total) * 100));
-                        teamProgress.setString("Building team " + current + "/" + total);
+                        teamProgress.setString("Branches Checked: " + current);
                     });
                 });
             
-            teams.sort((a, b) -> Double.compare(b.realScore, a.realScore));
+            // Note: TeamBuilder already returns sorted results, but usually just one best team
             
             SwingUtilities.invokeLater(() -> {
                 teamTableModel.setRowCount(0);
@@ -737,10 +700,10 @@ public class UIComponents {
                 }
                 
                 teamProgress.setValue(100);
-                teamProgress.setString("Complete! " + teams.size() + " teams");
+                teamProgress.setString("Complete! Found optimal team.");
                 
                 long elapsed = System.currentTimeMillis() - start;
-                log("Built " + teams.size() + " teams in " + elapsed + "ms");
+                log("Search complete in " + elapsed + "ms");
                 isBuilding.set(false);
             });
         }).start();
@@ -1065,7 +1028,6 @@ public class UIComponents {
         log("Cleared roster (" + count + " removed)");
     }
 
-    // New methods for legendary management
     private void addAllLegendaries() {
         int added = 0;
         for (String legendary : legendarySet) {
@@ -1116,10 +1078,6 @@ public class UIComponents {
     }
 
     private void resetTeamSettings() {
-        spinNumTeams.setValue(5);
-        spinIterations.setValue(2000);
-        spinRandomness.setValue(3);
-        cmbAlgorithmMode.setSelectedIndex(1); // Reset to Balanced
         chkAllowSameSpeciesInTeam.setSelected(false);
         chkSharedTypes.setSelected(false);
         chkSelfFusion.setSelected(false);
@@ -1131,24 +1089,20 @@ public class UIComponents {
                        sldAbilityWeight.getValue() + sldMoveWeight.getValue();
         StringBuilder sb = new StringBuilder();
         sb.append("=======================================================\n");
-        sb.append("FUSION SCORING ALGORITHM v9.1 - ENHANCED\n");
+        sb.append("FUSION SCORING ALGORITHM v10.0 - DETERMINISTIC\n");
         sb.append("=======================================================\n\n");
         sb.append("COMPONENT WEIGHTS (normalized to 1.0):\n");
-        sb.append(String.format("   * Base Stats:     %.2f\n", sldStatWeight.getValue() / total));
-        sb.append(String.format("   * Type Synergy:   %.2f\n", sldTypeWeight.getValue() / total));
-        sb.append(String.format("   * Ability:        %.2f\n", sldAbilityWeight.getValue() / total));
-        sb.append(String.format("   * Moveset:        %.2f\n\n", sldMoveWeight.getValue() / total));
-        sb.append("ABILITY FEATURES:\n");
-        sb.append("   * All abilities ranked per fusion\n");
-        sb.append("   * 40+ synergy patterns\n");
-        sb.append("   * Negative synergies for bad combos\n\n");
-        sb.append("TEAM BALANCE BONUSES:\n");
-        sb.append("   * Role diversity: +0.03 to +0.15\n");
-        sb.append("   * Coverage bonus: +0.05 to +0.10\n");
-        sb.append("   * Imbalance penalty: -0.05 to -0.10\n\n");
-        sb.append("DIMINISHING RETURNS:\n");
-        sb.append("   * Scores above 0.85 face 70% penalty\n");
-        sb.append("   * Prevents excessive 1.0 scores\n");
+        sb.append(String.format("   * Base Stats:      %.2f\n", sldStatWeight.getValue() / total));
+        sb.append(String.format("   * Type Synergy:    %.2f\n", sldTypeWeight.getValue() / total));
+        sb.append(String.format("   * Ability:         %.2f\n", sldAbilityWeight.getValue() / total));
+        sb.append(String.format("   * Moveset:         %.2f\n\n", sldMoveWeight.getValue() / total));
+        sb.append("ALGORITHM: BRANCH AND BOUND\n");
+        sb.append("   * Sorts fusions by Base Score\n");
+        sb.append("   * Prunes impossible branches\n");
+        sb.append("   * Guarantees Global Maximum\n\n");
+        sb.append("TEAM BALANCE:\n");
+        sb.append("   * Role diversity bonus applied\n");
+        sb.append("   * Shared weakness penalties applied\n");
         sb.append("=======================================================");
         txtAlgoInfo.setText(sb.toString());
     }
@@ -1183,9 +1137,9 @@ public class UIComponents {
         }
         
         sb.append("========================================\n");
-        sb.append(String.format("   HP:  %3d    SpA: %3d    BST: %3d  \n", p.hp, p.spa, p.getBST()));
-        sb.append(String.format("   Atk: %3d    SpD: %3d              \n", p.atk, p.spd));
-        sb.append(String.format("   Def: %3d    Spe: %3d              \n", p.def, p.spe));
+        sb.append(String.format("   HP:  %3d     SpA: %3d     BST: %3d  \n", p.hp, p.spa, p.getBST()));
+        sb.append(String.format("   Atk: %3d     SpD: %3d               \n", p.atk, p.spd));
+        sb.append(String.format("   Def: %3d     Spe: %3d               \n", p.def, p.spe));
         sb.append("========================================\n");
         sb.append("   ABILITIES (with multipliers)         \n");
         sb.append("========================================\n");
