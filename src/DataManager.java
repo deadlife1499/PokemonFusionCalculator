@@ -1,5 +1,5 @@
-import java.util.*;
 import java.io.*;
+import java.util.*;
 import java.util.stream.Collectors;
 
 class DataManager {
@@ -16,7 +16,7 @@ class DataManager {
         pokemon = new PokemonDatabase("pokemon.csv");
         abilities = new AbilityDatabase("abilities.csv");
         movesets = new MovesetDatabase("movesets.csv");
-        typeRankings = new TypeRankings("typeRanks.csv");
+        typeRankings = new TypeRankings("type_ranks.csv");
         
         // Initialize new systems
         synergy = new SynergyManager("synergies.csv");
